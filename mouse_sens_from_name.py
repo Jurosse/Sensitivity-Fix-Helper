@@ -14,8 +14,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_BEATMAPS_PATH = BASE_DIR / "beatmaps"
 DEFAULT_REPLAYS_PATH = BASE_DIR / "replays"
 
-MIN_JUMP_DIST = 40.0      # px, on ignore les micro-mouvements pour le biais directionnel
-ADJUST_FACTOR = 0.7       # à quel point on suit le biais pour proposer un changement de sens
+MIN_JUMP_DIST = 40.0      # px, ignore very small movements for directional bias
+ADJUST_FACTOR = 0.7       # how strongly we follow the bias to suggest a new sens
 
 
 def load_replay(path: Path) -> Replay:
@@ -26,12 +26,6 @@ def load_replay(path: Path) -> Replay:
 
 
 def build_beatmap_index(beatmaps_dir: Path) -> dict[str, Path]:
-    """
-    Build a dict: beatmap_md5 -> path to a .osu file.
-    Supports:
-      - .osu files directly in beatmaps_dir
-      - .osz archives in beatmaps_dir (their .osu are extracted to .extracted_osu/)
-    """
     index: dict[str, Path] = {}
     cache_dir = beatmaps_dir / ".extracted_osu"
     cache_dir.mkdir(exist_ok=True)
@@ -104,14 +98,12 @@ def find_nearest_action_with_click(actions, target_time, max_delta_ms=80):
 
 def analyze_replay(replay: Replay, beatmap: Beatmap):
     """
-    Retourne:
-      - errors: liste des erreurs radiales (distance au centre)
-      - parallel_norms: liste des erreurs signées le long du mouvement, normalisées par la distance du jump
-        (positif = overshoot, négatif = undershoot)
+    returns:
+      errors: radial errors (distance to center)
+      parallel_norms: signed errors along movement, normalised by jump length
     """
     errors = []
     parallel_norms = []
-
     last_pos = None
 
     for ho in beatmap.hit_objects():
@@ -125,7 +117,6 @@ def analyze_replay(replay: Replay, beatmap: Beatmap):
             continue
 
         cx, cy = ho.position.x, ho.position.y
-
         circle_time_ms = ho.time.total_seconds() * 1000.0
         action = find_nearest_action_with_click(replay.actions, circle_time_ms)
 
@@ -134,13 +125,12 @@ def analyze_replay(replay: Replay, beatmap: Beatmap):
             continue
 
         px, py = action.position.x, action.position.y
-
         dx = px - cx
         dy = py - cy
         dist = math.hypot(dx, dy)
         errors.append(dist)
 
-        # Biais directionnel pour les jumps assez longs
+        # directional bias for larger jumps
         if last_pos is not None:
             mvx = cx - last_pos.x
             mvy = cy - last_pos.y
@@ -152,7 +142,7 @@ def analyze_replay(replay: Replay, beatmap: Beatmap):
 
                 ex = px - cx
                 ey = py - cy
-                parallel = ex * vx + ey * vy       # >0: overshoot, <0: undershoot
+                parallel = ex * vx + ey * vy  # >0 overshoot, <0 undershoot
 
                 parallel_norms.append(parallel / move_dist)
 
@@ -196,12 +186,14 @@ def summarize_errors(errors):
 
 
 def get_sensitivity_for_replay(osr_path: Path, default_sens: float = 1.0) -> float:
+    # try from filename: ...sens0.8.osr
     m = re.search(r"sens([0-9]+(?:\.[0-9]+)?)", osr_path.stem)
     if m:
         sens = float(m.group(1))
         print(f"[INFO] Using sensitivity {sens} from filename '{osr_path.name}'.")
         return sens
 
+    # otherwise ask user, default if empty
     while True:
         raw = input(
             f"Enter in-game sensitivity for '{osr_path.name}' "
@@ -217,6 +209,30 @@ def get_sensitivity_for_replay(osr_path: Path, default_sens: float = 1.0) -> flo
 
         try:
             sens = float(raw)
+            return sens
+        except ValueError:
+            print("[WARN] Invalid sensitivity. Please enter a number (e.g. 0.8, 1.0).")
+
+
+def ask_global_sensitivity() -> float | None:
+    """
+    Ask once if all replays share the same sens.
+    If user enters a value, it's used for every replay.
+    If user presses Enter, per-replay sensitivities are used.
+    """
+    while True:
+        raw = input(
+            "If ALL your replays use the same in-game sensitivity, enter it here "
+            "(e.g. 0.6). Otherwise, press Enter to set sensitivity per replay: "
+        ).strip()
+
+        if raw == "":
+            print("[INFO] No global sensitivity provided, will set sensitivity per replay.")
+            return None
+
+        try:
+            sens = float(raw)
+            print(f"[INFO] Using global sensitivity {sens} for all replays.")
             return sens
         except ValueError:
             print("[WARN] Invalid sensitivity. Please enter a number (e.g. 0.8, 1.0).")
@@ -278,12 +294,18 @@ def main():
 
     print(f"[INFO] Indexed {len(beatmap_index)} beatmaps by MD5.")
 
+    # ask once if user uses the same sens for all replays
+    global_sens = ask_global_sensitivity()
+
     sens_radial_errors = defaultdict(list)
     sens_parallel_norms = defaultdict(list)
     beatmap_cache: dict[Path, Beatmap] = {}
 
     for osr in sorted(replays_path.glob("*.osr")):
-        sens = get_sensitivity_for_replay(osr)
+        if global_sens is not None:
+            sens = global_sens
+        else:
+            sens = get_sensitivity_for_replay(osr)
 
         try:
             replay = load_replay(osr)
@@ -338,7 +360,7 @@ def main():
 
         parallels = sens_parallel_norms.get(sens, [])
         if parallels:
-            mean_bias = sum(parallels) / len(parallels)  # >0 = overshoot, <0 = undershoot
+            mean_bias = sum(parallels) / len(parallels)  # >0 overshoot, <0 undershoot
         else:
             mean_bias = None
         per_sens_bias[sens] = mean_bias
@@ -361,7 +383,6 @@ def main():
                 best_score = stats["p95"]
                 best_sens = sens
 
-    # Afficher le biais directionnel
     print("\n=== Directional bias along movement (jumps) ===")
     print("Sens\tMean bias (% of jump)\tInterpretation")
     for sens in sorted(per_sens_bias.keys()):
@@ -380,7 +401,6 @@ def main():
 
         print(f"{sens:.3f}\t{bias_pct:+6.2f}%\t\t{interp}")
 
-    # Suggestion spéciale si une seule sensi
     if len(sens_radial_errors) == 1:
         sens = next(iter(sens_radial_errors.keys()))
         bias = per_sens_bias.get(sens)
@@ -399,7 +419,6 @@ def main():
             else:
                 direction = "overshoot (sens too high)" if bias > 0 else "undershoot (sens too low)"
                 new_sens = sens * (1.0 - bias * ADJUST_FACTOR)
-                # clamp pour éviter les changements extrêmes
                 new_sens = max(sens * 0.5, min(sens * 1.5, new_sens))
                 change_pct = (new_sens / sens - 1.0) * 100.0
 
