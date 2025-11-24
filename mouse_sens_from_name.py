@@ -118,15 +118,27 @@ def summarize_errors(errors):
     }
 
 
-def ask_sensitivity_for_replay(osr_path: Path):
+def get_sensitivity_for_replay(osr_path: Path, default_sens: float = 1.0) -> float:
+    # Try to auto-extract from filename, e.g. "something_sens0.8.osr"
+    m = re.search(r"sens([0-9]+(?:\.[0-9]+)?)", osr_path.stem)
+    if m:
+        sens = float(m.group(1))
+        print(f"[INFO] Using sensitivity {sens} from filename '{osr_path.name}'.")
+        return sens
+
+    # Fallback: ask the user, default if empty
     while True:
         raw = input(
-            f"Enter in-game sensitivity for '{osr_path.name}' (empty to skip): "
+            f"Enter in-game sensitivity for '{osr_path.name}' "
+            f"(empty to use default {default_sens}): "
         ).strip()
 
         if raw == "":
-            print(f"[INFO] Replay {osr_path.name} skipped (no sensitivity provided).")
-            return None
+            print(
+                f"[INFO] No sensitivity provided for {osr_path.name}, "
+                f"using default {default_sens}."
+            )
+            return default_sens
 
         try:
             sens = float(raw)
@@ -195,7 +207,7 @@ def main():
     beatmap_cache: dict[Path, Beatmap] = {}
 
     for osr in sorted(replays_path.glob("*.osr")):
-        sens = ask_sensitivity_for_replay(osr)
+        sens = get_sensitivity_for_replay(osr)
         if sens is None:
             continue
 
