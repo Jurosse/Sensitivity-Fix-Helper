@@ -1,4 +1,3 @@
-import re
 import math
 import argparse
 from pathlib import Path
@@ -10,13 +9,6 @@ from slider.game_mode import GameMode
 
 DEFAULT_SONGS_PATH = Path(r"C:\Users\user\AppData\Local\osu!\Songs")
 DEFAULT_REPLAYS_PATH = Path(r"C:\Users\user\Documents\GitHub\Sensitivity-Fix-Helper\Replays")
-
-
-def extract_sens_from_name(path: Path) -> float | None:
-    m = re.search(r"sens([0-9]+(?:\.[0-9]+)?)", path.stem)
-    if not m:
-        return None
-    return float(m.group(1))
 
 
 def load_replay(path: Path, library: Library) -> Replay:
@@ -115,6 +107,24 @@ def summarize_errors(errors):
     }
 
 
+def ask_sensitivity_for_replay(osr_path: Path) -> float | None:
+    while True:
+        raw = input(
+            f"Enter in-game sensitivity for '{osr_path.name}' "
+            f"(empty to skip): "
+        ).strip()
+
+        if raw == "":
+            print(f"[INFO] Replay {osr_path.name} skipped (no sensitivity provided).")
+            return None
+
+        try:
+            sens = float(raw)
+            return sens
+        except ValueError:
+            print("[WARN] Invalid sensitivity. Please enter a number (e.g. 0.8, 1.0).")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze osu! replays to compare accuracy for different mouse sensitivities."
@@ -168,10 +178,9 @@ def main():
 
     sens_errors = defaultdict(list)
 
-    for osr in replays_path.glob("*.osr"):
-        sens = extract_sens_from_name(osr)
+    for osr in sorted(replays_path.glob("*.osr")):
+        sens = ask_sensitivity_for_replay(osr)
         if sens is None:
-            print(f"[WARN] Could not extract sensitivity from {osr.name}, skipped.")
             continue
 
         try:
@@ -189,7 +198,7 @@ def main():
         print(f"[INFO] {osr.name}: {len(errors)} hitcircles analyzed for sens {sens}.")
 
     if not sens_errors:
-        print("No data analyzed. Check replay filenames (pattern 'sensX.Y').")
+        print("No data analyzed. No sensitivity provided or no valid replays.")
         return
 
     print("\n=== Sensitivity summary (error in osu! pixels) ===")
