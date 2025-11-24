@@ -1,6 +1,8 @@
 import math
 import argparse
 import hashlib
+import zipfile
+import re
 from pathlib import Path
 from collections import defaultdict
 
@@ -22,13 +24,57 @@ def load_replay(path: Path) -> Replay:
 
 def build_beatmap_index(beatmaps_dir: Path) -> dict[str, Path]:
     """
-    Build a dict: md5 -> .osu path for all .osu files in beatmaps_dir.
+    Build a dict: beatmap_md5 -> path to a .osu file.
+    Supports:
+      - .osu files directly in beatmaps_dir
+      - .osz archives in beatmaps_dir (their .osu are extracted to .extracted_osu/)
     """
     index: dict[str, Path] = {}
+    cache_dir = beatmaps_dir / ".extracted_osu"
+    cache_dir.mkdir(exist_ok=True)
+
+    # Direct .osu files
     for osu_path in beatmaps_dir.glob("*.osu"):
-        data = osu_path.read_bytes()
+        try:
+            data = osu_path.read_bytes()
+        except Exception as e:
+            print(f"[WARN] Could not read {osu_path}: {e}")
+            continue
+
         md5 = hashlib.md5(data).hexdigest()
-        index[md5] = osu_path
+        if md5 not in index:
+            index[md5] = osu_path
+
+    # .osz archives
+    for osz_path in beatmaps_dir.glob("*.osz"):
+        try:
+            with zipfile.ZipFile(osz_path, "r") as zf:
+                for name in zf.namelist():
+                    if not name.lower().endswith(".osu"):
+                        continue
+
+                    try:
+                        data = zf.read(name)
+                    except Exception as e:
+                        print(f"[WARN] Could not read {name} in {osz_path.name}: {e}")
+                        continue
+
+                    md5 = hashlib.md5(data).hexdigest()
+                    if md5 in index:
+                        continue
+
+                    cache_path = cache_dir / f"{md5}.osu"
+                    if not cache_path.exists():
+                        try:
+                            cache_path.write_bytes(data)
+                        except Exception as e:
+                            print(f"[WARN] Could not write cache file {cache_path}: {e}")
+                            continue
+
+                    index[md5] = cache_path
+        except Exception as e:
+            print(f"[WARN] Could not open osz {osz_path.name}: {e}")
+
     return index
 
 
@@ -156,7 +202,7 @@ def main():
         type=Path,
         default=DEFAULT_BEATMAPS_PATH,
         help=(
-            "Folder containing the .osu beatmaps used for the replays. "
+            "Folder containing the .osu/.osz beatmaps used for the replays. "
             f"Default: {DEFAULT_BEATMAPS_PATH}"
         ),
     )
@@ -198,7 +244,7 @@ def main():
 
     beatmap_index = build_beatmap_index(beatmaps_path)
     if not beatmap_index:
-        print("[ERROR] No .osu files found in beatmaps folder.")
+        print("[ERROR] No .osu or .osz beatmaps found in beatmaps folder.")
         return
 
     print(f"[INFO] Indexed {len(beatmap_index)} beatmaps by MD5.")
@@ -208,9 +254,6 @@ def main():
 
     for osr in sorted(replays_path.glob("*.osr")):
         sens = get_sensitivity_for_replay(osr)
-        if sens is None:
-            continue
-
         try:
             replay = load_replay(osr)
         except Exception as e:
@@ -221,8 +264,8 @@ def main():
         osu_path = beatmap_index.get(md5)
         if osu_path is None:
             print(
-                f"[WARN] No .osu matching MD5 {md5} for replay {osr.name}. "
-                f"Make sure the correct .osu is in {beatmaps_path}."
+                f"[WARN] No beatmap matching MD5 {md5} for replay {osr.name}. "
+                f"Make sure the correct .osu or .osz is in {beatmaps_path}."
             )
             continue
 
@@ -245,7 +288,7 @@ def main():
         )
 
     if not sens_errors:
-        print("No data analyzed. No sensitivity provided or no valid replays/beatmaps.")
+        print("No data analyzed. No valid replays/beatmaps or sensitivity provided.")
         return
 
     print("\n=== Sensitivity summary (error in osu! pixels) ===")
