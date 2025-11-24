@@ -1,23 +1,35 @@
 import math
 import argparse
+import hashlib
 from pathlib import Path
 from collections import defaultdict
 
-from slider.library import Library
 from slider.replay import Replay
 from slider.game_mode import GameMode
+from slider.beatmap import Beatmap
 
-DEFAULT_SONGS_PATH = Path(r"C:\Users\user\AppData\Local\osu!\Songs")
-DEFAULT_REPLAYS_PATH = Path(r"C:\Users\user\Documents\GitHub\Sensitivity-Fix-Helper\Replays")
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_BEATMAPS_PATH = BASE_DIR / "beatmaps"
+DEFAULT_REPLAYS_PATH = BASE_DIR / "replays"
 
 
-def load_replay(path: Path, library: Library) -> Replay:
-    r = Replay.from_path(path, library=library, retrieve_beatmap=True)
+def load_replay(path: Path) -> Replay:
+    r = Replay.from_path(path, retrieve_beatmap=False)
     if r.mode != GameMode.standard:
         raise ValueError(f"{path} is not an osu!standard replay.")
-    if r.beatmap is None:
-        raise ValueError(f"Could not find beatmap for {path} (unknown MD5).")
     return r
+
+
+def build_beatmap_index(beatmaps_dir: Path) -> dict[str, Path]:
+    """
+    Build a dict: md5 -> .osu path for all .osu files in beatmaps_dir.
+    """
+    index: dict[str, Path] = {}
+    for osu_path in beatmaps_dir.glob("*.osu"):
+        data = osu_path.read_bytes()
+        md5 = hashlib.md5(data).hexdigest()
+        index[md5] = osu_path
+    return index
 
 
 def find_nearest_action_with_click(actions, target_time, max_delta_ms=80):
@@ -41,11 +53,10 @@ def find_nearest_action_with_click(actions, target_time, max_delta_ms=80):
     return best_action
 
 
-def analyze_replay(replay: Replay):
-    bm = replay.beatmap
+def analyze_replay(replay: Replay, beatmap: Beatmap):
     errors = []
 
-    for ho in bm.hit_objects:
+    for ho in beatmap.hit_objects:
         has_pos = hasattr(ho, "position")
         has_time = hasattr(ho, "time")
         has_end = hasattr(ho, "end_time")
@@ -107,11 +118,10 @@ def summarize_errors(errors):
     }
 
 
-def ask_sensitivity_for_replay(osr_path: Path) -> float | None:
+def ask_sensitivity_for_replay(osr_path: Path):
     while True:
         raw = input(
-            f"Enter in-game sensitivity for '{osr_path.name}' "
-            f"(empty to skip): "
+            f"Enter in-game sensitivity for '{osr_path.name}' (empty to skip): "
         ).strip()
 
         if raw == "":
@@ -130,12 +140,12 @@ def main():
         description="Analyze osu! replays to compare accuracy for different mouse sensitivities."
     )
     parser.add_argument(
-        "--songs",
+        "--beatmaps",
         type=Path,
-        default=DEFAULT_SONGS_PATH,
+        default=DEFAULT_BEATMAPS_PATH,
         help=(
-            "Path to your osu! Songs folder (the one that contains .slider.db). "
-            f"Default: {DEFAULT_SONGS_PATH}"
+            "Folder containing the .osu beatmaps used for the replays. "
+            f"Default: {DEFAULT_BEATMAPS_PATH}"
         ),
     )
     parser.add_argument(
@@ -156,27 +166,33 @@ def main():
 
     args = parser.parse_args()
 
-    songs_path = args.songs
+    beatmaps_path = args.beatmaps
     replays_path = args.replays
     dpi = args.dpi
 
-    print(f"[INFO] Songs folder   : {songs_path}")
-    print(f"[INFO] Replays folder : {replays_path}")
+    print(f"[INFO] Beatmaps folder : {beatmaps_path}")
+    print(f"[INFO] Replays folder  : {replays_path}")
     if dpi is not None:
-        print(f"[INFO] Mouse DPI      : {dpi}")
+        print(f"[INFO] Mouse DPI       : {dpi}")
     else:
-        print("[INFO] Mouse DPI      : not provided (eDPI will not be shown)")
+        print("[INFO] Mouse DPI       : not provided (eDPI will not be shown)")
 
-    if not songs_path.exists():
-        print(f"[ERROR] Songs folder does not exist: {songs_path}")
+    if not beatmaps_path.exists():
+        print(f"[ERROR] Beatmaps folder does not exist: {beatmaps_path}")
         return
     if not replays_path.exists():
         print(f"[ERROR] Replays folder does not exist: {replays_path}")
         return
 
-    library = Library(songs_path)
+    beatmap_index = build_beatmap_index(beatmaps_path)
+    if not beatmap_index:
+        print("[ERROR] No .osu files found in beatmaps folder.")
+        return
+
+    print(f"[INFO] Indexed {len(beatmap_index)} beatmaps by MD5.")
 
     sens_errors = defaultdict(list)
+    beatmap_cache: dict[Path, Beatmap] = {}
 
     for osr in sorted(replays_path.glob("*.osr")):
         sens = ask_sensitivity_for_replay(osr)
@@ -184,21 +200,40 @@ def main():
             continue
 
         try:
-            replay = load_replay(osr, library)
+            replay = load_replay(osr)
         except Exception as e:
             print(f"[WARN] Error loading {osr.name}: {e}")
             continue
 
-        errors = analyze_replay(replay)
+        md5 = replay.beatmap_md5
+        osu_path = beatmap_index.get(md5)
+        if osu_path is None:
+            print(
+                f"[WARN] No .osu matching MD5 {md5} for replay {osr.name}. "
+                f"Make sure the correct .osu is in {beatmaps_path}."
+            )
+            continue
+
+        if osu_path not in beatmap_cache:
+            try:
+                beatmap_cache[osu_path] = Beatmap.from_path(osu_path)
+            except Exception as e:
+                print(f"[WARN] Error parsing beatmap {osu_path.name}: {e}")
+                continue
+
+        beatmap = beatmap_cache[osu_path]
+        errors = analyze_replay(replay, beatmap)
         if not errors:
             print(f"[WARN] No errors computed for {osr.name}")
             continue
 
         sens_errors[sens].extend(errors)
-        print(f"[INFO] {osr.name}: {len(errors)} hitcircles analyzed for sens {sens}.")
+        print(
+            f"[INFO] {osr.name}: {len(errors)} hitcircles analyzed for sens {sens}."
+        )
 
     if not sens_errors:
-        print("No data analyzed. No sensitivity provided or no valid replays.")
+        print("No data analyzed. No sensitivity provided or no valid replays/beatmaps.")
         return
 
     print("\n=== Sensitivity summary (error in osu! pixels) ===")
