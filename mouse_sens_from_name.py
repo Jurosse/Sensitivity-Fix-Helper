@@ -14,6 +14,9 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_BEATMAPS_PATH = BASE_DIR / "beatmaps"
 DEFAULT_REPLAYS_PATH = BASE_DIR / "replays"
 
+MIN_JUMP_DIST = 40.0      # px, on ignore les micro-mouvements pour le biais directionnel
+ADJUST_FACTOR = 0.7       # à quel point on suit le biais pour proposer un changement de sens
+
 
 def load_replay(path: Path) -> Replay:
     r = Replay.from_path(path, retrieve_beatmap=False)
@@ -100,9 +103,18 @@ def find_nearest_action_with_click(actions, target_time, max_delta_ms=80):
 
 
 def analyze_replay(replay: Replay, beatmap: Beatmap):
+    """
+    Retourne:
+      - errors: liste des erreurs radiales (distance au centre)
+      - parallel_norms: liste des erreurs signées le long du mouvement, normalisées par la distance du jump
+        (positif = overshoot, négatif = undershoot)
+    """
     errors = []
+    parallel_norms = []
 
-    for ho in beatmap.hit_objects:
+    last_pos = None
+
+    for ho in beatmap.hit_objects():
         has_pos = hasattr(ho, "position")
         has_time = hasattr(ho, "time")
         has_end = hasattr(ho, "end_time")
@@ -112,22 +124,41 @@ def analyze_replay(replay: Replay, beatmap: Beatmap):
         if has_end:
             continue
 
+        cx, cy = ho.position.x, ho.position.y
+
         circle_time_ms = ho.time.total_seconds() * 1000.0
         action = find_nearest_action_with_click(replay.actions, circle_time_ms)
 
         if action is None:
+            last_pos = ho.position
             continue
 
-        cx, cy = ho.position.x, ho.position.y
         px, py = action.position.x, action.position.y
 
         dx = px - cx
         dy = py - cy
         dist = math.hypot(dx, dy)
-
         errors.append(dist)
 
-    return errors
+        # Biais directionnel pour les jumps assez longs
+        if last_pos is not None:
+            mvx = cx - last_pos.x
+            mvy = cy - last_pos.y
+            move_dist = math.hypot(mvx, mvy)
+
+            if move_dist > MIN_JUMP_DIST:
+                vx = mvx / move_dist
+                vy = mvy / move_dist
+
+                ex = px - cx
+                ey = py - cy
+                parallel = ex * vx + ey * vy       # >0: overshoot, <0: undershoot
+
+                parallel_norms.append(parallel / move_dist)
+
+        last_pos = ho.position
+
+    return errors, parallel_norms
 
 
 def summarize_errors(errors):
@@ -165,14 +196,12 @@ def summarize_errors(errors):
 
 
 def get_sensitivity_for_replay(osr_path: Path, default_sens: float = 1.0) -> float:
-    # Try to auto-extract from filename, e.g. "something_sens0.8.osr"
     m = re.search(r"sens([0-9]+(?:\.[0-9]+)?)", osr_path.stem)
     if m:
         sens = float(m.group(1))
         print(f"[INFO] Using sensitivity {sens} from filename '{osr_path.name}'.")
         return sens
 
-    # Fallback: ask the user, default if empty
     while True:
         raw = input(
             f"Enter in-game sensitivity for '{osr_path.name}' "
@@ -195,7 +224,7 @@ def get_sensitivity_for_replay(osr_path: Path, default_sens: float = 1.0) -> flo
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze osu! replays to compare accuracy for different mouse sensitivities."
+        description="Analyze osu! replays to compare and adjust mouse sensitivities."
     )
     parser.add_argument(
         "--beatmaps",
@@ -249,11 +278,13 @@ def main():
 
     print(f"[INFO] Indexed {len(beatmap_index)} beatmaps by MD5.")
 
-    sens_errors = defaultdict(list)
+    sens_radial_errors = defaultdict(list)
+    sens_parallel_norms = defaultdict(list)
     beatmap_cache: dict[Path, Beatmap] = {}
 
     for osr in sorted(replays_path.glob("*.osr")):
         sens = get_sensitivity_for_replay(osr)
+
         try:
             replay = load_replay(osr)
         except Exception as e:
@@ -277,17 +308,18 @@ def main():
                 continue
 
         beatmap = beatmap_cache[osu_path]
-        errors = analyze_replay(replay, beatmap)
+        errors, parallels = analyze_replay(replay, beatmap)
         if not errors:
             print(f"[WARN] No errors computed for {osr.name}")
             continue
 
-        sens_errors[sens].extend(errors)
+        sens_radial_errors[sens].extend(errors)
+        sens_parallel_norms[sens].extend(parallels)
         print(
             f"[INFO] {osr.name}: {len(errors)} hitcircles analyzed for sens {sens}."
         )
 
-    if not sens_errors:
+    if not sens_radial_errors:
         print("No data analyzed. No valid replays/beatmaps or sensitivity provided.")
         return
 
@@ -299,9 +331,18 @@ def main():
 
     best_sens = None
     best_score = None
+    per_sens_bias: dict[float, float | None] = {}
 
-    for sens in sorted(sens_errors.keys()):
-        stats = summarize_errors(sens_errors[sens])
+    for sens in sorted(sens_radial_errors.keys()):
+        stats = summarize_errors(sens_radial_errors[sens])
+
+        parallels = sens_parallel_norms.get(sens, [])
+        if parallels:
+            mean_bias = sum(parallels) / len(parallels)  # >0 = overshoot, <0 = undershoot
+        else:
+            mean_bias = None
+        per_sens_bias[sens] = mean_bias
+
         if dpi is not None:
             edpi = dpi * sens
             print(
@@ -320,19 +361,61 @@ def main():
                 best_score = stats["p95"]
                 best_sens = sens
 
-    if best_sens is not None:
-        if dpi is not None:
-            best_edpi = dpi * best_sens
-            print(
-                f"\n>>> 'Optimal' sensitivity (lowest P95 error): {best_sens:.3f} "
-                f"(eDPI ≈ {best_edpi:.1f})"
-            )
+    # Afficher le biais directionnel
+    print("\n=== Directional bias along movement (jumps) ===")
+    print("Sens\tMean bias (% of jump)\tInterpretation")
+    for sens in sorted(per_sens_bias.keys()):
+        bias = per_sens_bias[sens]
+        if bias is None:
+            print(f"{sens:.3f}\tN/A\t\t\t(no valid jumps)")
+            continue
+
+        bias_pct = bias * 100.0
+        if abs(bias_pct) < 1.5:
+            interp = "roughly balanced"
+        elif bias_pct > 0:
+            interp = "overshoot (sens a bit high)"
         else:
-            print(
-                f"\n>>> 'Optimal' sensitivity (lowest P95 error): {best_sens:.3f}"
-            )
-    else:
-        print("\nCould not determine an 'optimal' sensitivity (not enough data).")
+            interp = "undershoot (sens a bit low)"
+
+        print(f"{sens:.3f}\t{bias_pct:+6.2f}%\t\t{interp}")
+
+    # Suggestion spéciale si une seule sensi
+    if len(sens_radial_errors) == 1:
+        sens = next(iter(sens_radial_errors.keys()))
+        bias = per_sens_bias.get(sens)
+
+        print("\n=== Single-sensitivity suggestion ===")
+
+        if bias is None:
+            print("Not enough directional data (jumps) to suggest an adjustment.")
+        else:
+            bias_pct = bias * 100.0
+            if abs(bias_pct) < 1.5:
+                print(
+                    f"Your sensitivity {sens:.3f} looks well-calibrated: "
+                    f"average directional bias is only {bias_pct:+.2f}% of jump distance."
+                )
+            else:
+                direction = "overshoot (sens too high)" if bias > 0 else "undershoot (sens too low)"
+                new_sens = sens * (1.0 - bias * ADJUST_FACTOR)
+                # clamp pour éviter les changements extrêmes
+                new_sens = max(sens * 0.5, min(sens * 1.5, new_sens))
+                change_pct = (new_sens / sens - 1.0) * 100.0
+
+                print(
+                    f"On average you have a {direction}: {bias_pct:+.2f}% of the jump distance."
+                )
+                print(
+                    f"As a rough suggestion, you could adjust your sens from {sens:.3f} "
+                    f"to about {new_sens:.3f} ({change_pct:+.1f}% change)."
+                )
+                print("This is a heuristic; fine-tune around that value based on feel.")
+
+    if best_sens is not None and len(sens_radial_errors) > 1:
+        print(
+            f"\n>>> 'Optimal' sensitivity (lowest P95 error across all tested): {best_sens:.3f}"
+        )
 
 
 if __name__ == "__main__":
