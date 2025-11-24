@@ -1,51 +1,43 @@
 # Sensitivity-Fix-Helper
 
-Analyze osu! replays to compare your **mouse sensitivities** and find which one gives you the most precise aim.
+Tool for osu! mouse players to **analyze aim accuracy** from replays and:
+- compare different mouse sensitivities, or
+- with **one single sensitivity**, see if you tend to **overshoot / undershoot** jumps
+  and get a suggestion on how to adjust your sens.
 
-This tool is inspired by projects like *Area-Fixer-Helper*, but focuses on **mouse players**: it measures how far your cursor is from the center of each hitcircle at the moment you click.
+It works by measuring, for each hitcircle:
+- the distance between the circle center and your cursor at hit time,
+- and, for jumps, how much you overshoot/undershoot **along the direction of movement**.
 
 ---
 
 ## Features
 
-- Reads `.osr` replays and automatically finds the matching `.osu` beatmap (using the [`slider`](https://pypi.org/project/slider/) library).
-- Computes the distance (error) between:
-  - the center of each hitcircle  
-  - your cursor position when you hit it
-- Aggregates stats **per sensitivity**:
-  - number of hitcircles
-  - mean error
-  - median error
-  - 95th percentile (P95) error
-- Optionally uses your **DPI** to compute **eDPI**.
-- Prints which sensitivity looks "optimal" (lowest P95 error).
-
----
-
-## How it works (short version)
-
-1. Each replay file is associated with a **mouse sensitivity** via its filename.  
-   Example:  
-   - `MyMap [Hard] - sens0.7.osr` → sens = `0.7`  
-   - `MyMap [Hard] - sens1.0.osr` → sens = `1.0`
-
-2. For each hitcircle in the beatmap:
-   - The script finds the closest click action (mouse1/mouse2/key1/key2).
-   - It measures the distance between the circle center and your cursor in osu! pixels.
-
-3. For each sensitivity, it aggregates all errors and prints statistics.  
-   The **lowest P95** is used as a simple “best sensitivity” criterion.
+- Reads `.osr` replays and finds the correct beatmap via the replay’s MD5.
+- Supports beatmaps as **`.osu`** or **`.osz`** in a simple `beatmaps/` folder (no `slider.db` or osu! `Songs` folder needed).
+- For each sensitivity, computes:
+  - number of hitcircles,
+  - mean error,
+  - median error,
+  - 95th percentile (P95) error.
+- Computes **directional bias** on jumps:
+  - positive = overshoot (sens a bit too high),
+  - negative = undershoot (sens a bit too low),
+  - expressed as % of jump distance.
+- If you only use **one sensitivity** across all replays:
+  - tells you if it’s already well calibrated,
+  - or suggests a new sensitivity based on your average overshoot/undershoot.
+- Optional **DPI input** to display eDPI.
 
 ---
 
 ## Requirements
 
-- Python 3.9+ (recommended)
-- osu! installed (to have a `Songs` folder with beatmaps)
-- Python packages:
-  - `slider`
+- Python 3.9+
+- Python package:
+  - [`slider`](https://pypi.org/project/slider/)
 
-Install dependencies:
+Install:
 
 ```bash
-pip install -r requirements.txt
+pip install slider
