@@ -41,3 +41,7 @@ Install:
 
 ```bash
 pip install slider
+
+or
+```bash
+pip install -r requirements.txt
