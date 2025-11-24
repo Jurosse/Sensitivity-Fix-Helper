@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+
+# Virtual env
+.env
+.venv
+venv/
+env/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# PyCharm / VSCode
+.idea/
+.vscode/
+
+# Project-specific
+Replays/
+*.osr
+*.osu
+*.db
+.slider.db
